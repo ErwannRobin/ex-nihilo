@@ -1,6 +1,6 @@
 # EX NIHILO
 
-A 43-second demoscene film where every pixel and every sound comes from a single HTML file (~280 KB): no images, no audio files, no fonts, no libraries.
+A 43-second demoscene film where every pixel and every sound comes from a single HTML file (~310 KB with the player and exporter): no images, no audio files, no fonts, no libraries.
 
 It was made by Claude Opus 5.5 from a one-line prompt asking it to build the most impressive demo of its own capabilities. The project and film are by **Justin Perea**:
 
@@ -20,6 +20,12 @@ Open `index.html` in a desktop browser (tested in Chrome). The soundtrack is syn
 | `←` / `→` | Back / forward 2 s (`Shift`: 0.1 s) |
 | `Home` / `End` | Jump to start / end |
 | `F` | Fullscreen |
+| `C` / `</>` | Show the code: the scene's GLSL next to the film, following the playhead |
+| `E` / `⤓` | Export the film to MP4, rendered in your browser |
+
+## Export
+
+The export dialog re-renders every frame offline, the same way the published film was made (several samples per frame for motion blur and anti-aliasing), then encodes H.264 + AAC with WebCodecs and writes the MP4 with a small muxer in the file. Nothing is uploaded. At 1080p60, 1 sample per frame takes under a minute on an M-series Mac; 4 samples takes about 10 minutes, and 12 samples (as published) about 30. Needs a recent Chrome or Edge.
 
 The live page renders one sample per pixel and scales its resolution to hold 60 fps, so it looks softer than the recorded film, especially on weaker GPUs.
 
