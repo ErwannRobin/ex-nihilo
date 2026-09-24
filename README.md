@@ -11,7 +11,7 @@ This repository keeps a copy of the file, with video-style playback controls add
 
 ## Run it
 
-Open `ex-nihilo.html` in a desktop browser (tested in Chrome). The soundtrack is synthesized first ("synthesizing sound…"), then click to begin, with sound on.
+Open `index.html` in a desktop browser (tested in Chrome). The soundtrack is synthesized first ("synthesizing sound…"), then click to begin, with sound on.
 
 | Control | Action |
 |---|---|
