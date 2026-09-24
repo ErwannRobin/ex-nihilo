@@ -18,11 +18,25 @@ canvas { display: block; }
 #ui h1 { font: 200 46px "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: .55em; padding-left: .55em;
          margin: 0 0 22px; color: #fff; }
 #ui.hide { opacity: 0; pointer-events: none; }
+#bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 14px;
+       padding: 32px 20px 14px; background: linear-gradient(transparent, rgba(0,0,0,.75));
+       color: #ddd; font: 12px Menlo, monospace; user-select: none; transition: opacity .3s; }
+#bar.off { opacity: 0; }
+#play { width: 24px; padding: 0; border: 0; background: none; color: #fff; font: 15px Menlo, monospace; cursor: pointer; }
+#track { position: relative; flex: 1; height: 17px; cursor: pointer; touch-action: none; }
+#track::before, #fill { content: ''; position: absolute; left: 0; top: 7px; height: 3px; border-radius: 2px; }
+#track::before { right: 0; background: rgba(255,255,255,.25); }
+#fill { width: 0; background: #fff; }
+#knob { position: absolute; z-index: 1; top: 3px; width: 11px; height: 11px; margin-left: -5.5px; border-radius: 50%; background: #fff; }
+.mark { position: absolute; top: 5px; width: 2px; height: 7px; margin-left: -1px; background: rgba(255,255,255,.5); }
+#time { min-width: 96px; text-align: right; font-variant-numeric: tabular-nums; }
+body.idle { cursor: none; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="ui"><h1>EX NIHILO</h1><div id="msg">synthesizing sound…</div></div>
+<div id="bar" class="off"><button id="play" title="Play / pause (space)">▶</button><div id="track"><div id="fill"></div><div id="knob"></div></div><div id="time">0:00 / 0:00</div></div>
 <script type="x-shader" data-name="lib">
 // ============================================================================
 // EX NIHILO — shared GLSL prelude. Prepended to every scene.
@@ -5718,41 +5732,143 @@ function live() {
     console.log(`soundtrack synthesized in ${(performance.now() - t0).toFixed(0)} ms`);
   }, 30);
 
-  let ctx = null, startAt = 0, running = false, frame = 0, last = 0, avg = 16;
-  function start() {
-    if (!song || running) return;
-    ctx = ctx || new AudioContext({ latencyHint: 'playback' });
-    const buf = ctx.createBuffer(2, song.left.length, song.sampleRate);
-    buf.copyToChannel(song.left, 0); buf.copyToChannel(song.right, 1);
-    const src = ctx.createBufferSource();
-    src.buffer = buf; src.connect(ctx.destination);
-    startAt = ctx.currentTime + 0.1;
-    src.start(startAt);
-    running = true; frame = 0;
-    ui.classList.add('hide');
-    requestAnimationFrame(loop);
+  // ---- Video-style transport: play/pause, seekable progress bar, scene markers. ----
+  const DUR = EX.timeline.duration;
+  const bar = document.getElementById('bar'), track = document.getElementById('track');
+  const fill = document.getElementById('fill'), knob = document.getElementById('knob');
+  const playBtn = document.getElementById('play'), timeEl = document.getElementById('time');
+  for (const s of EX.timeline.scenes) {
+    if (s.start <= 0) continue;
+    const m = document.createElement('div');
+    m.className = 'mark'; m.style.left = (s.start / DUR * 100) + '%';
+    if (s.title) m.title = s.title;
+    track.appendChild(m);
   }
-  function loop(now) {
-    if (!running) return;
-    const t = ctx.currentTime - startAt - (ctx.outputLatency || 0);
-    if (t > EX.timeline.duration) {
-      running = false; ui.classList.remove('hide'); msg.textContent = 'click to replay'; return;
+
+  let ctx = null, buf = null, src = null, startAt = 0, pos = 0;
+  let playing = false, started = false, dirty = true, scrubbing = false, resumeAfterScrub = false;
+  let frame = 0, last = 0, avg = 16;
+  const clamp = (t) => Math.min(DUR, Math.max(0, t));
+  const fmt = (t) => Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
+  const now = () => playing ? ctx.currentTime - startAt - (ctx.outputLatency || 0) : pos;
+
+  function stopAudio() {
+    if (!src) return;
+    try { src.stop(); } catch (e) {}
+    src.disconnect(); src = null;
+  }
+  function play(from = pos) {
+    if (!song) return;
+    if (from >= DUR - 0.05) from = 0;
+    ctx = ctx || new AudioContext({ latencyHint: 'playback' });
+    if (!buf) {
+      buf = ctx.createBuffer(2, song.left.length, song.sampleRate);
+      buf.copyToChannel(song.left, 0); buf.copyToChannel(song.right, 1);
     }
-    engine.renderFrame(Math.max(0, t), { spp: 1, frame: frame++ });
-    // Dynamic resolution: hold ~60 fps.
-    if (last) {
-      avg = avg * 0.92 + (now - last) * 0.08;
+    stopAudio();
+    src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination);
+    const when = ctx.currentTime + 0.05;
+    src.start(when, from);
+    startAt = when - from;
+    pos = from; playing = true; last = 0;
+    ctx.resume();
+    poke();
+  }
+  function pause() {
+    if (!playing) return;
+    pos = clamp(now()); playing = false; dirty = true;
+    stopAudio(); poke();
+  }
+  const toggle = () => playing ? pause() : play();
+  function seek(t) {
+    t = clamp(t);
+    if (playing) play(t); else { pos = t; dirty = true; }
+  }
+
+  function updateBar(t) {
+    const p = (clamp(t) / DUR * 100) + '%';
+    fill.style.width = p; knob.style.left = p;
+    timeEl.textContent = fmt(clamp(t)) + ' / ' + fmt(DUR);
+    playBtn.textContent = playing ? '❚❚' : (pos >= DUR ? '↺' : '▶');
+  }
+
+  // Auto-hide controls and cursor while playing and idle.
+  let idleTimer = 0;
+  function poke() {
+    if (!started) return;
+    bar.classList.remove('off'); document.body.classList.remove('idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (playing && !scrubbing) { bar.classList.add('off'); document.body.classList.add('idle'); }
+    }, 2500);
+  }
+  addEventListener('pointermove', poke);
+
+  // Scrubbing: pause audio while dragging, render the frame under the pointer, resume on release.
+  const timeAt = (e) => { const r = track.getBoundingClientRect(); return (e.clientX - r.left) / r.width * DUR; };
+  track.addEventListener('pointerdown', (e) => {
+    track.setPointerCapture(e.pointerId);
+    scrubbing = true; resumeAfterScrub = playing || pos >= DUR;
+    pause(); seek(timeAt(e));
+  });
+  track.addEventListener('pointermove', (e) => {
+    track.title = fmt(clamp(timeAt(e)));
+    if (scrubbing) seek(timeAt(e));
+  });
+  const endScrub = () => {
+    if (!scrubbing) return;
+    scrubbing = false;
+    if (resumeAfterScrub && pos < DUR) play(pos);
+    poke();
+  };
+  track.addEventListener('pointerup', endScrub);
+  track.addEventListener('pointercancel', endScrub);
+  playBtn.addEventListener('click', () => { toggle(); playBtn.blur(); });
+  canvas.addEventListener('click', () => { if (started) toggle(); });
+
+  function loop(ts) {
+    requestAnimationFrame(loop);
+    const t = now();
+    if (playing && t >= DUR) { pos = DUR; playing = false; stopAudio(); poke(); }
+    if (playing || dirty) {
+      engine.renderFrame(clamp(t), { spp: 1, frame: frame++ });
+      dirty = false;
+    }
+    // Dynamic resolution: hold ~60 fps (only measured while playing).
+    if (playing && last) {
+      avg = avg * 0.92 + (ts - last) * 0.08;
       if (frame % 30 === 0) {
         const prev = scale;
         if (avg > 19) scale = Math.max(0.3, scale * 0.9); else if (avg < 15.5) scale = Math.min(1, scale * 1.05);
         if (prev !== scale) layout();
       }
     }
-    last = now;
+    last = playing ? ts : 0;
+    updateBar(t);
+  }
+
+  function start() {
+    if (!song || started) return;
+    started = true;
+    ui.classList.add('hide');
+    play(0);
     requestAnimationFrame(loop);
   }
   ui.addEventListener('click', start);
-  addEventListener('keydown', (e) => { if (e.key === 'f') document.documentElement.requestFullscreen?.(); });
+  addEventListener('resize', () => { dirty = true; });
+  addEventListener('keydown', (e) => {
+    if (e.key === 'f') document.documentElement.requestFullscreen?.();
+    if (!started) return;
+    const step = e.shiftKey ? 0.1 : 2;
+    if (e.key === ' ' || e.key === 'k') { e.preventDefault(); toggle(); }
+    else if (e.key === 'ArrowLeft') seek(now() - step);
+    else if (e.key === 'ArrowRight') seek(now() + step);
+    else if (e.key === 'Home') seek(0);
+    else if (e.key === 'End') seek(DUR);
+    else return;
+    poke();
+  });
 }
 })();
 </script>
